@@ -13,7 +13,7 @@ const {
   setIcon,
 } = require("obsidian");
 
-const VIEW_TYPE = "meal-planner-calendar-view";
+const VIEW_TYPE = "meal-planner-view";
 const GITHUB_REPO = "alangan17/obsidian-meal-planner";
 const RELEASE_FILES = ["manifest.json", "main.js", "styles.css"];
 const DEFAULT_SETTINGS = {
@@ -30,13 +30,13 @@ module.exports = class MealPlannerCalendarPlugin extends Plugin {
 
     this.registerView(VIEW_TYPE, (leaf) => new MealPlannerView(leaf, this));
 
-    this.addRibbonIcon("calendar-days", "Meal planner calendar", () => {
+    this.addRibbonIcon("calendar-days", "Meal planner", () => {
       this.activateView();
     });
 
     this.addCommand({
-      id: "open-meal-planner-calendar",
-      name: "Open meal planner calendar",
+      id: "open-meal-planner",
+      name: "Open meal planner",
       callback: () => this.activateView(),
     });
 
@@ -71,16 +71,16 @@ module.exports = class MealPlannerCalendarPlugin extends Plugin {
       const currentVersion = this.manifest.version;
 
       if (!isNewerVersion(remoteVersion, currentVersion)) {
-        new Notice(`Meal Planner Calendar is up to date (${currentVersion}).`);
+        new Notice(`Meal Planner is up to date (${currentVersion}).`);
         return { updated: false, currentVersion, remoteVersion };
       }
 
       if (!install) {
-        new Notice(`Meal Planner Calendar ${remoteVersion} is available.`);
+        new Notice(`Meal Planner ${remoteVersion} is available.`);
         return { updated: false, currentVersion, remoteVersion };
       }
 
-      new Notice(`Installing Meal Planner Calendar ${remoteVersion}...`);
+      new Notice(`Installing Meal Planner ${remoteVersion}...`);
       const files = await downloadReleaseFiles(release.tag_name, remoteVersion);
       const pluginDir = `${this.app.vault.configDir}/plugins/${this.manifest.dir || this.manifest.id}`;
 
@@ -88,10 +88,10 @@ module.exports = class MealPlannerCalendarPlugin extends Plugin {
         return this.app.vault.adapter.write(`${pluginDir}/${file}`, files[file]);
       }));
 
-      new Notice(`Installed Meal Planner Calendar ${remoteVersion}. Reload Obsidian to finish updating.`, 10000);
+      new Notice(`Installed Meal Planner ${remoteVersion}. Reload Obsidian to finish updating.`, 10000);
       return { updated: true, currentVersion, remoteVersion };
     } catch (error) {
-      console.error("Meal Planner Calendar update failed", error);
+      console.error("Meal Planner update failed", error);
       new Notice(`Meal Planner update failed: ${error.message || error}`);
       return { updated: false, error };
     }
@@ -107,7 +107,7 @@ class MealPlannerSettingTab extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "Meal Planner Calendar" });
+    containerEl.createEl("h2", { text: "Meal Planner" });
 
     new Setting(containerEl)
       .setName("Recipe folder")

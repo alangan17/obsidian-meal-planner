@@ -1,6 +1,6 @@
 {
-  "id": "meal-planner-calendar",
-  "name": "Meal Planner Calendar",
+  "id": "meal-planner",
+  "name": "Meal Planner",
   "version": "0.1.0",
   "minAppVersion": "1.5.0",
   "description": "Plan daily cooking with recipe links and switch between recipe, ingredient, and nutrition views.",
