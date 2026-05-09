@@ -6,6 +6,7 @@ const {
   Notice,
   Plugin,
   PluginSettingTab,
+  requestUrl,
   Setting,
   TFile,
   parseYaml,
@@ -13,6 +14,8 @@ const {
 } = require("obsidian");
 
 const VIEW_TYPE = "meal-planner-calendar-view";
+const GITHUB_REPO = "alangan17/obsidian-meal-planner";
+const RELEASE_FILES = ["manifest.json", "main.js", "styles.css"];
 const DEFAULT_SETTINGS = {
   recipeFolder: "recipe",
   ingredientsFolder: "ingredients",
@@ -37,6 +40,12 @@ module.exports = class MealPlannerCalendarPlugin extends Plugin {
       callback: () => this.activateView(),
     });
 
+    this.addCommand({
+      id: "check-stable-release-update",
+      name: "Check for stable release update",
+      callback: () => this.checkForStableReleaseUpdate({ install: true }),
+    });
+
     this.addSettingTab(new MealPlannerSettingTab(this.app, this));
   }
 
@@ -53,6 +62,39 @@ module.exports = class MealPlannerCalendarPlugin extends Plugin {
 
   async saveSettings() {
     await this.saveData(this.settings);
+  }
+
+  async checkForStableReleaseUpdate({ install = false } = {}) {
+    try {
+      const release = await fetchLatestRelease();
+      const remoteVersion = versionFromTag(release.tag_name);
+      const currentVersion = this.manifest.version;
+
+      if (!isNewerVersion(remoteVersion, currentVersion)) {
+        new Notice(`Meal Planner Calendar is up to date (${currentVersion}).`);
+        return { updated: false, currentVersion, remoteVersion };
+      }
+
+      if (!install) {
+        new Notice(`Meal Planner Calendar ${remoteVersion} is available.`);
+        return { updated: false, currentVersion, remoteVersion };
+      }
+
+      new Notice(`Installing Meal Planner Calendar ${remoteVersion}...`);
+      const files = await downloadReleaseFiles(release.tag_name, remoteVersion);
+      const pluginDir = `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+
+      await Promise.all(RELEASE_FILES.map((file) => {
+        return this.app.vault.adapter.write(`${pluginDir}/${file}`, files[file]);
+      }));
+
+      new Notice(`Installed Meal Planner Calendar ${remoteVersion}. Reload Obsidian to finish updating.`, 10000);
+      return { updated: true, currentVersion, remoteVersion };
+    } catch (error) {
+      console.error("Meal Planner Calendar update failed", error);
+      new Notice(`Meal Planner update failed: ${error.message || error}`);
+      return { updated: false, error };
+    }
   }
 };
 
@@ -107,6 +149,25 @@ class MealPlannerSettingTab extends PluginSettingTab {
             this.plugin.settings.defaultMeals = meals.length ? meals : DEFAULT_SETTINGS.defaultMeals.slice();
             await this.plugin.saveSettings();
             await this.refreshOpenViews();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Stable release updates")
+      .setDesc("Check GitHub releases and install the latest stable release branch.")
+      .addButton((button) => {
+        button
+          .setButtonText("Check and install")
+          .setCta()
+          .onClick(async () => {
+            button.setDisabled(true);
+            button.setButtonText("Checking...");
+            try {
+              await this.plugin.checkForStableReleaseUpdate({ install: true });
+            } finally {
+              button.setDisabled(false);
+              button.setButtonText("Check and install");
+            }
           });
       });
   }
@@ -1465,6 +1526,81 @@ function formatAmount(value) {
 function displayUnit(unit) {
   if (unit === "unit") return "each";
   return unit;
+}
+
+async function fetchLatestRelease() {
+  const response = await requestUrl({
+    url: `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`,
+    headers: {
+      Accept: "application/vnd.github+json",
+    },
+  });
+
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`GitHub latest release request failed (${response.status})`);
+  }
+
+  if (!response.json || !response.json.tag_name) {
+    throw new Error("GitHub latest release did not include a tag name.");
+  }
+
+  return response.json;
+}
+
+async function downloadReleaseFiles(tagName, expectedVersion) {
+  const branch = `release/${tagName}`;
+  const entries = await Promise.all(RELEASE_FILES.map(async (file) => {
+    const response = await requestUrl({
+      url: `https://api.github.com/repos/${GITHUB_REPO}/contents/${file}?ref=${encodeURIComponent(branch)}`,
+      headers: {
+        Accept: "application/vnd.github.raw",
+      },
+    });
+
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(`Could not download ${file} from ${branch} (${response.status})`);
+    }
+
+    if (!response.text) {
+      throw new Error(`Downloaded empty ${file} from ${branch}.`);
+    }
+
+    return [file, response.text];
+  }));
+
+  const files = Object.fromEntries(entries);
+  const manifest = JSON.parse(files["manifest.json"]);
+  if (manifest.version !== expectedVersion) {
+    throw new Error(`Release manifest version is ${manifest.version}, expected ${expectedVersion}.`);
+  }
+
+  return files;
+}
+
+function versionFromTag(tagName) {
+  const version = String(tagName || "").replace(/^v/i, "");
+  if (!/^\d+\.\d+\.\d+([+-][0-9A-Za-z.-]+)?$/.test(version)) {
+    throw new Error(`Release tag ${tagName} is not a valid stable version.`);
+  }
+  return version;
+}
+
+function isNewerVersion(candidate, current) {
+  const candidateParts = parseVersion(candidate);
+  const currentParts = parseVersion(current);
+
+  for (let index = 0; index < 3; index += 1) {
+    if (candidateParts[index] > currentParts[index]) return true;
+    if (candidateParts[index] < currentParts[index]) return false;
+  }
+
+  return false;
+}
+
+function parseVersion(version) {
+  const match = String(version || "").match(/^(\d+)\.(\d+)\.(\d+)/);
+  if (!match) return [0, 0, 0];
+  return match.slice(1, 4).map((part) => Number(part));
 }
 
 function readFrontmatter(text) {

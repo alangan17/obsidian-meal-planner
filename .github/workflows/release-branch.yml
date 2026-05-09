@@ -1,0 +1,106 @@
+name: Create release branch
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag to turn into a branch, for example v1.2.3"
+        required: true
+      target_ref:
+        description: "Commit, tag, or branch to branch from. Defaults to the repository default branch."
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-branch-${{ github.event.release.tag_name || inputs.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  create-release-branch:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve release metadata
+        id: release
+        env:
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          EVENT_TARGET: ${{ github.event.release.target_commitish }}
+          INPUT_TAG: ${{ inputs.tag_name }}
+          INPUT_TARGET: ${{ inputs.target_ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          tag_name="${EVENT_TAG:-$INPUT_TAG}"
+          target_ref="${EVENT_TARGET:-${INPUT_TARGET:-$DEFAULT_BRANCH}}"
+
+          if [ -z "$tag_name" ]; then
+            echo "Missing release tag." >&2
+            exit 1
+          fi
+
+          version="${tag_name#v}"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$'; then
+            echo "Release tag '$tag_name' must look like v1.2.3 or 1.2.3." >&2
+            exit 1
+          fi
+
+          branch_name="release/$tag_name"
+          {
+            echo "tag_name=$tag_name"
+            echo "target_ref=$target_ref"
+            echo "version=$version"
+            echo "branch_name=$branch_name"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check out release target
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.target_ref }}
+          fetch-depth: 0
+
+      - name: Check whether release branch already exists
+        env:
+          BRANCH_NAME: ${{ steps.release.outputs.branch_name }}
+        run: |
+          if git ls-remote --exit-code --heads origin "$BRANCH_NAME"; then
+            echo "Release branch '$BRANCH_NAME' already exists." >&2
+            exit 1
+          fi
+
+      - name: Update Obsidian plugin version
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+
+          const manifestPath = 'manifest.json';
+          const version = process.env.VERSION;
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+
+          manifest.version = version;
+          fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+          NODE
+
+      - name: Commit and push release branch
+        env:
+          BRANCH_NAME: ${{ steps.release.outputs.branch_name }}
+          TAG_NAME: ${{ steps.release.outputs.tag_name }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git switch -c "$BRANCH_NAME"
+          git add manifest.json
+
+          if git diff --cached --quiet; then
+            echo "manifest.json already has version $VERSION."
+          else
+            git commit -m "Prepare release $TAG_NAME"
+          fi
+
+          git push origin "$BRANCH_NAME"
