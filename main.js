@@ -82,7 +82,7 @@ module.exports = class MealPlannerCalendarPlugin extends Plugin {
 
       new Notice(`Installing Meal Planner Calendar ${remoteVersion}...`);
       const files = await downloadReleaseFiles(release.tag_name, remoteVersion);
-      const pluginDir = `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+      const pluginDir = `${this.app.vault.configDir}/plugins/${this.manifest.dir || this.manifest.id}`;
 
       await Promise.all(RELEASE_FILES.map((file) => {
         return this.app.vault.adapter.write(`${pluginDir}/${file}`, files[file]);
