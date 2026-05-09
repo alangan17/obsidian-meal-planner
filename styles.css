@@ -178,8 +178,21 @@
 .mp-entry {
   background: var(--background-secondary);
   border-radius: 7px;
+  cursor: grab;
   margin-bottom: 6px;
   padding: 7px;
+}
+
+.mp-entry.is-dragging {
+  cursor: grabbing;
+  opacity: 0.55;
+}
+
+.mp-day.is-drop-target,
+.mp-meal.is-drop-target,
+.mp-empty-meal-drop.is-drop-target {
+  border-color: var(--interactive-accent);
+  box-shadow: inset 0 0 0 1px var(--interactive-accent);
 }
 
 .mp-entry-has-image {
@@ -198,6 +211,7 @@
 }
 
 .mp-entry-has-image .mp-icon-button,
+.mp-entry-has-image .mp-drag-handle,
 .mp-entry-has-image .mp-meal-badge {
   background: rgba(0, 0, 0, 0.42);
   border-color: rgba(255, 255, 255, 0.3);
@@ -224,6 +238,28 @@
   text-decoration: none;
 }
 
+.mp-drag-handle {
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-muted);
+  cursor: grab;
+  display: inline-flex;
+  flex: 0 0 24px;
+  height: 24px;
+  justify-content: center;
+  width: 24px;
+}
+
+.mp-drag-handle:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.mp-entry.is-dragging .mp-drag-handle {
+  cursor: grabbing;
+}
+
 .mp-month .mp-recipe-link {
   word-break: keep-all;
 }
@@ -243,6 +279,27 @@
   text-overflow: ellipsis;
   text-transform: uppercase;
   white-space: nowrap;
+}
+
+.mp-empty-meal-drops {
+  display: none;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.mp-dragging-entry .mp-empty-meal-drops {
+  display: grid;
+}
+
+.mp-empty-meal-drop {
+  border: 1px dashed var(--background-modifier-border);
+  border-radius: 7px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  min-height: 30px;
+  padding: 7px;
+  text-transform: uppercase;
 }
 
 .mp-detail {

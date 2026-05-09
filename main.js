@@ -130,6 +130,7 @@ class MealPlannerView extends ItemView {
     this.cursorDate = startOfDay(new Date());
     this.recipeCache = [];
     this.fileMetaCache = new Map();
+    this.dragPayload = null;
   }
 
   getViewType() {
@@ -228,6 +229,7 @@ class MealPlannerView extends ItemView {
         isToday ? "mp-today" : "",
       ].filter(Boolean).join(" "),
     });
+    this.entryDropTarget(day, key, null);
 
     const head = day.createDiv({ cls: "mp-day-head" });
     head.createDiv({ cls: "mp-date", text: this.dayLabel(date) });
@@ -238,6 +240,7 @@ class MealPlannerView extends ItemView {
     const mealNames = this.mealNamesFor(dayPlans);
     if (mealNames.length === 0) {
       day.createDiv({ cls: "mp-empty", text: "No plan" });
+      this.renderEmptyMealDropTargets(day, key, mealNames);
       return;
     }
 
@@ -250,9 +253,11 @@ class MealPlannerView extends ItemView {
       const entries = dayPlans[mealName] || [];
       if (!entries.length) return;
       const section = day.createDiv({ cls: "mp-meal" });
+      this.entryDropTarget(section, key, mealName);
       section.createDiv({ cls: "mp-meal-name", text: mealName });
       entries.forEach((entry, index) => this.renderEntry(section, key, mealName, entry, index));
     });
+    this.renderEmptyMealDropTargets(day, key, mealNames);
   }
 
   renderAllDay(day, dayKey, dayPlans, mealNames) {
@@ -271,8 +276,22 @@ class MealPlannerView extends ItemView {
     }
 
     const section = day.createDiv({ cls: "mp-meal mp-all-day" });
+    this.entryDropTarget(section, dayKey, null);
     entries.forEach(({ entry, mealName, index }) => {
       this.renderEntry(section, dayKey, mealName, entry, index, { showMealLabel: true });
+    });
+    this.renderEmptyMealDropTargets(day, dayKey, mealNames);
+  }
+
+  renderEmptyMealDropTargets(day, dayKey, existingMealNames) {
+    const existing = new Set(existingMealNames);
+    const targets = this.plugin.settings.defaultMeals.filter((mealName) => !existing.has(mealName));
+    if (!targets.length) return;
+
+    const wrap = day.createDiv({ cls: "mp-empty-meal-drops" });
+    targets.forEach((mealName) => {
+      const target = wrap.createDiv({ cls: "mp-empty-meal-drop", text: mealName });
+      this.entryDropTarget(target, dayKey, mealName);
     });
   }
 
@@ -309,7 +328,9 @@ class MealPlannerView extends ItemView {
   renderEntry(section, dayKey, mealName, entry, index, options = {}) {
     const recipe = this.recipeCache.find((item) => item.path === entry.path);
     const card = section.createDiv({ cls: "mp-entry" });
+    this.entryDragSource(card, dayKey, mealName, index);
     const row = card.createDiv({ cls: "mp-entry-row" });
+    this.entryDragHandle(row, card, dayKey, mealName, index);
     if (options.showMealLabel) {
       row.createSpan({ cls: "mp-meal-badge", text: mealName });
     }
@@ -317,7 +338,9 @@ class MealPlannerView extends ItemView {
       cls: "mp-recipe-link",
       text: recipe ? recipe.name : entry.name || entry.path,
       href: "#",
+      attr: { draggable: "false" },
     });
+    link.draggable = false;
     link.addEventListener("click", async (event) => {
       event.preventDefault();
       const file = this.app.vault.getAbstractFileByPath(entry.path);
@@ -532,16 +555,55 @@ class MealPlannerView extends ItemView {
     await this.render();
   }
 
+  async transferEntry(sourceDayKey, sourceMealName, sourceIndex, targetDayKey, targetMealName, mode) {
+    const finalMealName = String(targetMealName || sourceMealName || "").trim();
+    if (!finalMealName) {
+      new Notice("Choose a meal.");
+      return false;
+    }
+    if (mode === "move" && sourceDayKey === targetDayKey && sourceMealName === finalMealName) {
+      new Notice("Recipe is already in that meal.");
+      return false;
+    }
+
+    const sourceEntries = this.plugin.settings.plans[sourceDayKey]?.[sourceMealName];
+    const sourceEntry = sourceEntries?.[sourceIndex];
+    if (!sourceEntry) {
+      new Notice("Recipe is no longer in this plan.");
+      await this.render();
+      return false;
+    }
+
+    const plans = this.plugin.settings.plans;
+    if (!plans[targetDayKey]) plans[targetDayKey] = {};
+    if (!plans[targetDayKey][finalMealName]) plans[targetDayKey][finalMealName] = [];
+    plans[targetDayKey][finalMealName].push(cloneEntry(sourceEntry));
+
+    if (mode === "move") {
+      sourceEntries.splice(sourceIndex, 1);
+      this.cleanupEmptyPlan(sourceDayKey, sourceMealName);
+    }
+
+    await this.plugin.saveSettings();
+    await this.render();
+    new Notice(mode === "move" ? "Recipe moved." : "Recipe copied.");
+    return true;
+  }
+
   async removeEntry(dayKey, mealName, index) {
     const entries = this.plugin.settings.plans[dayKey]?.[mealName];
     if (!entries) return;
     entries.splice(index, 1);
-    if (!entries.length) delete this.plugin.settings.plans[dayKey][mealName];
-    if (!Object.keys(this.plugin.settings.plans[dayKey]).length) {
-      delete this.plugin.settings.plans[dayKey];
-    }
+    this.cleanupEmptyPlan(dayKey, mealName);
     await this.plugin.saveSettings();
     await this.render();
+  }
+
+  cleanupEmptyPlan(dayKey, mealName) {
+    const dayPlans = this.plugin.settings.plans[dayKey];
+    if (!dayPlans) return;
+    if (mealName && !dayPlans[mealName]?.length) delete dayPlans[mealName];
+    if (!Object.keys(dayPlans).length) delete this.plugin.settings.plans[dayKey];
   }
 
   async updateEntryServings(dayKey, mealName, index, recipe, targetServings) {
@@ -680,9 +742,104 @@ class MealPlannerView extends ItemView {
     return button;
   }
 
+  entryDragSource(card, dayKey, mealName, index) {
+    card.draggable = true;
+    card.addEventListener("dragstart", (event) => {
+      this.startEntryDrag(event, card, dayKey, mealName, index);
+    });
+    card.addEventListener("dragend", () => {
+      this.endEntryDrag(card);
+    });
+  }
+
+  entryDragHandle(parent, card, dayKey, mealName, index) {
+    const handle = parent.createEl("span", {
+      cls: "mp-drag-handle",
+      attr: { "aria-label": "Drag recipe", draggable: "true", title: "Drag recipe" },
+    });
+    setIcon(handle, "grip-vertical");
+    handle.draggable = true;
+    handle.addEventListener("dragstart", (event) => {
+      this.startEntryDrag(event, card, dayKey, mealName, index);
+    });
+    handle.addEventListener("dragend", () => {
+      this.endEntryDrag(card);
+    });
+  }
+
+  startEntryDrag(event, card, dayKey, mealName, index) {
+    event.stopPropagation();
+    this.dragPayload = { dayKey, mealName, index };
+    const payload = JSON.stringify(this.dragPayload);
+    if (event.dataTransfer) {
+      event.dataTransfer.setData("application/x-meal-planner-entry", payload);
+      event.dataTransfer.setData("text/plain", payload);
+      event.dataTransfer.effectAllowed = "move";
+    }
+    card.addClass("is-dragging");
+    this.containerEl.addClass("mp-dragging-entry");
+  }
+
+  endEntryDrag(card) {
+    card.removeClass("is-dragging");
+    this.containerEl.removeClass("mp-dragging-entry");
+    this.containerEl.querySelectorAll(".is-drop-target").forEach((el) => el.removeClass("is-drop-target"));
+    this.dragPayload = null;
+  }
+
+  entryDropTarget(target, dayKey, mealName) {
+    target.addEventListener("dragover", (event) => {
+      if (!this.draggedEntryPayload(event)) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+      target.addClass("is-drop-target");
+    });
+    target.addEventListener("dragleave", () => {
+      target.removeClass("is-drop-target");
+    });
+    target.addEventListener("drop", async (event) => {
+      const payload = this.draggedEntryPayload(event);
+      if (!payload) return;
+      event.preventDefault();
+      event.stopPropagation();
+      target.removeClass("is-drop-target");
+      this.containerEl.removeClass("mp-dragging-entry");
+      await this.transferEntry(payload.dayKey, payload.mealName, payload.index, dayKey, mealName || payload.mealName, "move");
+    });
+  }
+
+  draggedEntryPayload(event) {
+    if (this.dragPayload) return this.dragPayload;
+    const raw = event.dataTransfer?.getData("application/x-meal-planner-entry") || event.dataTransfer?.getData("text/plain");
+    if (!raw) return null;
+    try {
+      const payload = JSON.parse(raw);
+      if (!payload.dayKey || !payload.mealName || !Number.isInteger(payload.index)) return null;
+      return payload;
+    } catch (error) {
+      return null;
+    }
+  }
+
   entryMenuButton(parent, recipe, entry, dayKey, mealName, index) {
     return this.iconButton(parent, "more-horizontal", "Recipe actions", (event) => {
       const menu = new Menu();
+      menu.addItem((item) => {
+        item
+          .setTitle("Move to...")
+          .setIcon("move-right")
+          .onClick(() => {
+            new EntryTransferModal(this.app, this, "move", dayKey, mealName, index, entry).open();
+          });
+      });
+      menu.addItem((item) => {
+        item
+          .setTitle("Copy to...")
+          .setIcon("copy")
+          .onClick(() => {
+            new EntryTransferModal(this.app, this, "copy", dayKey, mealName, index, entry).open();
+          });
+      });
       if (recipe) {
         menu.addItem((item) => {
           item
@@ -703,6 +860,90 @@ class MealPlannerView extends ItemView {
       });
       menu.showAtMouseEvent(event);
     });
+  }
+}
+
+class EntryTransferModal extends Modal {
+  constructor(app, view, mode, dayKey, mealName, index, entry) {
+    super(app);
+    this.view = view;
+    this.mode = mode;
+    this.dayKey = dayKey;
+    this.mealName = mealName;
+    this.index = index;
+    this.entry = entry;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    const isMove = this.mode === "move";
+    let targetDayKey = this.dayKey;
+    let targetMealName = this.mealName;
+    let customMeal = "";
+
+    contentEl.addClass("mp-modal");
+    contentEl.createEl("h2", { text: isMove ? "Move recipe" : "Copy recipe" });
+    contentEl.createDiv({
+      cls: "mp-selected-recipe",
+      text: this.entry.name || this.entry.path,
+    });
+
+    new Setting(contentEl)
+      .setName("Day")
+      .addText((text) => {
+        text.inputEl.type = "date";
+        text.setValue(targetDayKey);
+        text.onChange((value) => {
+          targetDayKey = value.trim();
+        });
+      });
+
+    const mealOptions = uniqueValues(this.view.plugin.settings.defaultMeals.concat([this.mealName]));
+    new Setting(contentEl)
+      .setName("Meal")
+      .addDropdown((dropdown) => {
+        mealOptions.forEach((name) => dropdown.addOption(name, name));
+        dropdown.addOption("Other", "Other");
+        dropdown.setValue(targetMealName);
+        dropdown.onChange((value) => {
+          targetMealName = value;
+          otherWrap.style.display = value === "Other" ? "" : "none";
+        });
+      });
+
+    const otherWrap = contentEl.createDiv({ cls: "mp-other-meal" });
+    new Setting(otherWrap)
+      .setName("Custom meal")
+      .addText((text) => {
+        text.setPlaceholder("Snack");
+        text.onChange((value) => {
+          customMeal = value.trim();
+        });
+      });
+    otherWrap.style.display = "none";
+
+    new Setting(contentEl)
+      .addButton((button) => {
+        button.setButtonText(isMove ? "Move" : "Copy");
+        button.setCta();
+        button.onClick(async () => {
+          if (!isDateKey(targetDayKey)) {
+            new Notice("Choose a valid day.");
+            return;
+          }
+          const finalMeal = targetMealName === "Other" ? customMeal : targetMealName;
+          if (!finalMeal) {
+            new Notice("Enter a meal name.");
+            return;
+          }
+          const didTransfer = await this.view.transferEntry(this.dayKey, this.mealName, this.index, targetDayKey, finalMeal, this.mode);
+          if (didTransfer) this.close();
+        });
+      });
+  }
+
+  onClose() {
+    this.contentEl.empty();
   }
 }
 
@@ -976,6 +1217,14 @@ function normalizeArray(value) {
   if (!value) return [];
   if (Array.isArray(value)) return value.flat(3);
   return [value];
+}
+
+function cloneEntry(entry) {
+  return JSON.parse(JSON.stringify(entry));
+}
+
+function uniqueValues(values) {
+  return values.filter((value, index, list) => value && list.indexOf(value) === index);
 }
 
 function cleanFolderPath(value) {
@@ -1252,6 +1501,12 @@ function formatDateKey(date) {
   const month = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+function isDateKey(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ""))) return false;
+  const date = new Date(`${value}T00:00:00`);
+  return Number.isFinite(date.getTime()) && formatDateKey(date) === value;
 }
 
 function formatShortDate(date) {
