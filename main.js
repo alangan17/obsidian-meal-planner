@@ -70,6 +70,12 @@ module.exports = class MealPlannerCalendarPlugin extends Plugin {
     return loadedDir || this.manifest.dir || this.manifest.id;
   }
 
+  getPluginAdapterPath() {
+    const pluginDir = this.getPluginDir();
+    if (pluginDir.startsWith(`${this.app.vault.configDir}/plugins/`)) return pluginDir;
+    return `${this.app.vault.configDir}/plugins/${pluginDir}`;
+  }
+
   async checkForStableReleaseUpdate({ install = false } = {}) {
     try {
       const release = await fetchLatestRelease();
@@ -88,7 +94,7 @@ module.exports = class MealPlannerCalendarPlugin extends Plugin {
 
       new Notice(`Installing Meal Planner ${remoteVersion}...`);
       const files = await downloadReleaseFiles(release.tag_name, remoteVersion);
-      const pluginDir = `${this.app.vault.configDir}/plugins/${this.getPluginDir()}`;
+      const pluginDir = this.getPluginAdapterPath();
 
       await Promise.all(RELEASE_FILES.map((file) => {
         const path = `${pluginDir}/${file}`;
