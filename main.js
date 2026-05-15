@@ -200,10 +200,15 @@ class MealPlannerView extends ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
+    this.primaryMode = "calendar";
     this.viewMode = "month";
     this.detailMode = "recipe";
     this.groupMode = "meals";
     this.cursorDate = startOfDay(new Date());
+    this.shoppingFromDate = formatDateKey(startOfWeek(this.cursorDate));
+    this.shoppingToDate = formatDateKey(addDays(startOfWeek(this.cursorDate), 6));
+    this.showPantryItems = true;
+    this.shoppingCheckedItems = new Set();
     this.recipeCache = [];
     this.fileMetaCache = new Map();
     this.dragPayload = null;
@@ -238,7 +243,11 @@ class MealPlannerView extends ItemView {
     container.addClass("meal-planner-root");
 
     this.renderToolbar(container);
-    this.renderCalendar(container);
+    if (this.primaryMode === "shopping") {
+      this.renderShoppingList(container);
+    } else {
+      this.renderCalendar(container);
+    }
   }
 
   renderToolbar(container) {
@@ -246,21 +255,35 @@ class MealPlannerView extends ItemView {
 
     const left = toolbar.createDiv({ cls: "mp-toolbar-group" });
     this.iconButton(left, "chevron-left", "Previous", () => {
-      this.moveCursor(-1);
+      if (this.primaryMode === "shopping") this.moveShoppingRange(-1);
+      else this.moveCursor(-1);
     });
     left.createEl("button", { cls: "mp-button", text: "Today" }, (button) => {
       button.addEventListener("click", () => {
         this.cursorDate = startOfDay(new Date());
+        if (this.primaryMode === "shopping") this.syncShoppingRangeToCalendar();
         this.render();
       });
     });
     this.iconButton(left, "chevron-right", "Next", () => {
-      this.moveCursor(1);
+      if (this.primaryMode === "shopping") this.moveShoppingRange(1);
+      else this.moveCursor(1);
     });
 
     toolbar.createDiv({ cls: "mp-title", text: this.titleForCursor() });
 
     const right = toolbar.createDiv({ cls: "mp-toolbar-group mp-toolbar-wrap" });
+    this.segmented(right, ["calendar", "shopping"], this.primaryMode, (value) => {
+      this.primaryMode = value;
+      if (value === "shopping") this.syncShoppingRangeToCalendar();
+      this.render();
+    });
+
+    if (this.primaryMode === "shopping") {
+      this.renderShoppingControls(right);
+      return;
+    }
+
     this.segmented(right, ["month", "week", "day"], this.viewMode, (value) => {
       this.viewMode = value;
       this.render();
@@ -273,6 +296,27 @@ class MealPlannerView extends ItemView {
       this.groupMode = value;
       this.render();
     });
+  }
+
+  renderShoppingControls(parent) {
+    const dates = parent.createDiv({ cls: "mp-shopping-controls" });
+    this.dateInput(dates, "From", this.shoppingFromDate, (value) => {
+      this.shoppingFromDate = value;
+      this.render();
+    });
+    this.dateInput(dates, "To", this.shoppingToDate, (value) => {
+      this.shoppingToDate = value;
+      this.render();
+    });
+
+    const label = dates.createEl("label", { cls: "mp-toggle" });
+    const input = label.createEl("input", { attr: { type: "checkbox" } });
+    input.checked = this.showPantryItems;
+    input.addEventListener("change", () => {
+      this.showPantryItems = input.checked;
+      this.render();
+    });
+    label.createSpan({ text: "Pantry" });
   }
 
   renderCalendar(container) {
@@ -399,6 +443,90 @@ class MealPlannerView extends ItemView {
     if (totals.length > (this.viewMode === "day" ? 160 : 18)) {
       section.createSpan({ cls: "mp-more", text: `+${totals.length - (this.viewMode === "day" ? 160 : 18)}` });
     }
+  }
+
+  renderShoppingList(container) {
+    const wrap = container.createDiv({ cls: "mp-shopping" });
+
+    if (!isDateKey(this.shoppingFromDate) || !isDateKey(this.shoppingToDate)) {
+      wrap.createDiv({ cls: "mp-empty mp-warning", text: "Choose a valid date range." });
+      return;
+    }
+
+    if (this.shoppingFromDate > this.shoppingToDate) {
+      wrap.createDiv({ cls: "mp-empty mp-warning", text: "From date must be before To date." });
+      return;
+    }
+
+    const result = this.shoppingListForRange(this.shoppingFromDate, this.shoppingToDate);
+    const summary = wrap.createDiv({ cls: "mp-shopping-summary" });
+    summary.createDiv({
+      cls: "mp-shopping-title",
+      text: `${result.itemCount} item${result.itemCount === 1 ? "" : "s"} from ${result.recipeCount} planned recipe${result.recipeCount === 1 ? "" : "s"}`,
+    });
+    summary.createDiv({ cls: "mp-shopping-range", text: `${this.shoppingFromDate} to ${this.shoppingToDate}` });
+
+    if (result.warnings.length) {
+      const warning = wrap.createDiv({ cls: "mp-shopping-warning" });
+      result.warnings.slice(0, 5).forEach((message) => warning.createDiv({ text: message }));
+      if (result.warnings.length > 5) warning.createDiv({ text: `+${result.warnings.length - 5} more warning${result.warnings.length - 5 === 1 ? "" : "s"}` });
+    }
+
+    if (!result.groups.length && !result.pantry.length) {
+      wrap.createDiv({ cls: "mp-empty", text: "No planned ingredients in this date range." });
+      return;
+    }
+
+    result.groups.forEach((group) => this.renderShoppingCategory(wrap, group));
+
+    if (result.pantry.length) {
+      const pantry = {
+        category: "Pantry / Usually stocked",
+        items: result.pantry,
+        pantry: true,
+      };
+      this.renderShoppingCategory(wrap, pantry);
+    } else if (!this.showPantryItems && result.hiddenPantryCount) {
+      wrap.createDiv({
+        cls: "mp-shopping-muted",
+        text: `${result.hiddenPantryCount} pantry item${result.hiddenPantryCount === 1 ? "" : "s"} hidden.`,
+      });
+    }
+  }
+
+  renderShoppingCategory(parent, group) {
+    const section = parent.createDiv({ cls: group.pantry ? "mp-shopping-section mp-shopping-pantry" : "mp-shopping-section" });
+    const head = section.createDiv({ cls: "mp-shopping-section-head" });
+    head.createDiv({ cls: "mp-shopping-section-title", text: group.category });
+    head.createDiv({ cls: "mp-shopping-count", text: String(group.items.length) });
+
+    const list = section.createDiv({ cls: "mp-shopping-items" });
+    group.items.forEach((item) => this.renderShoppingItem(list, item));
+  }
+
+  renderShoppingItem(parent, item) {
+    const row = parent.createDiv({
+      cls: this.shoppingCheckedItems.has(item.key) ? "mp-shopping-item is-checked" : "mp-shopping-item",
+    });
+    const checkbox = row.createEl("input", { cls: "mp-shopping-check", attr: { type: "checkbox" } });
+    checkbox.checked = this.shoppingCheckedItems.has(item.key);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) {
+        this.shoppingCheckedItems.add(item.key);
+        row.addClass("is-checked");
+      } else {
+        this.shoppingCheckedItems.delete(item.key);
+        row.removeClass("is-checked");
+      }
+    });
+
+    const main = row.createDiv({ cls: "mp-shopping-item-main" });
+    main.createDiv({ cls: "mp-shopping-item-name", text: item.name });
+    main.createDiv({
+      cls: "mp-shopping-item-source",
+      text: `${item.recipeNames.size} recipe${item.recipeNames.size === 1 ? "" : "s"} · ${item.dateKeys.size} day${item.dateKeys.size === 1 ? "" : "s"}`,
+    });
+    row.createDiv({ cls: "mp-shopping-item-amount", text: item.label });
   }
 
   renderEntry(section, dayKey, mealName, entry, index, options = {}) {
@@ -557,6 +685,136 @@ class MealPlannerView extends ItemView {
     }));
 
     return known.concat(unknown).sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  shoppingListForRange(fromKey, toKey) {
+    const entries = this.entriesForDateRange(fromKey, toKey);
+    const totals = new Map();
+    const unknowns = new Map();
+    const warnings = [];
+
+    entries.forEach(({ dayKey, entry }) => {
+      const recipe = this.recipeCache.find((item) => item.path === entry.path);
+      if (!recipe) {
+        warnings.push(`Recipe file missing: ${entry.name || entry.path}`);
+        return;
+      }
+
+      recipe.ingredientDetails.forEach((ingredient) => {
+        const meta = this.metadataForIngredient(ingredient.name);
+        const category = this.shoppingCategoryForIngredient(ingredient.name, meta);
+        const pantry = this.isPantryIngredient(ingredient.name, meta, category);
+        const base = {
+          name: ingredient.name,
+          category,
+          pantry,
+          recipeNames: new Set([recipe.name]),
+          dateKeys: new Set([dayKey]),
+        };
+        const quantity = quantityForEntry(ingredient.amount, recipe, entry);
+
+        if (!quantity) {
+          const key = `${ingredient.name}::unknown::${category}::${pantry}`;
+          const current = unknowns.get(key) || Object.assign(base, { amounts: new Set() });
+          if (ingredient.amount) current.amounts.add(ingredient.amount);
+          current.recipeNames.add(recipe.name);
+          current.dateKeys.add(dayKey);
+          unknowns.set(key, current);
+          return;
+        }
+
+        const key = `${ingredient.name}::${quantity.unit}::${category}::${pantry}`;
+        const current = totals.get(key) || Object.assign(base, { value: 0, unit: quantity.unit });
+        current.value += quantity.value;
+        current.recipeNames.add(recipe.name);
+        current.dateKeys.add(dayKey);
+        totals.set(key, current);
+      });
+    });
+
+    const knownItems = Array.from(totals.values()).map((item) => Object.assign(item, {
+      label: `${formatAmount(item.value)} ${displayUnit(item.unit)}`,
+      key: shoppingItemKey(item.name, item.category, item.pantry, item.unit),
+    }));
+    const unknownItems = Array.from(unknowns.values()).map((item) => Object.assign(item, {
+      label: item.amounts.size ? Array.from(item.amounts).join(" + ") : "as needed",
+      key: shoppingItemKey(item.name, item.category, item.pantry, "unknown"),
+    }));
+
+    const items = knownItems.concat(unknownItems).sort((a, b) => {
+      const categoryCompare = a.category.localeCompare(b.category);
+      if (categoryCompare) return categoryCompare;
+      return a.name.localeCompare(b.name);
+    });
+
+    const visiblePantry = this.showPantryItems ? items.filter((item) => item.pantry) : [];
+    const hiddenPantryCount = this.showPantryItems ? 0 : items.filter((item) => item.pantry).length;
+    const regularItems = items.filter((item) => !item.pantry);
+    const groups = [];
+    const byCategory = new Map();
+
+    regularItems.forEach((item) => {
+      if (!byCategory.has(item.category)) byCategory.set(item.category, []);
+      byCategory.get(item.category).push(item);
+    });
+
+    preferredShoppingCategories().forEach((category) => {
+      const categoryItems = byCategory.get(category);
+      if (categoryItems?.length) {
+        groups.push({ category, items: categoryItems });
+        byCategory.delete(category);
+      }
+    });
+
+    Array.from(byCategory.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .forEach(([category, categoryItems]) => groups.push({ category, items: categoryItems }));
+
+    return {
+      groups,
+      pantry: visiblePantry.sort((a, b) => a.name.localeCompare(b.name)),
+      hiddenPantryCount,
+      itemCount: regularItems.length + visiblePantry.length,
+      recipeCount: new Set(entries.map((item) => item.entry.path)).size,
+      warnings,
+    };
+  }
+
+  entriesForDateRange(fromKey, toKey) {
+    const entries = [];
+    Object.entries(this.plugin.settings.plans)
+      .filter(([dayKey]) => dayKey >= fromKey && dayKey <= toKey)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .forEach(([dayKey, dayPlans]) => {
+        Object.entries(dayPlans || {}).forEach(([mealName, mealEntries]) => {
+          (mealEntries || []).forEach((entry, index) => {
+            entries.push({ dayKey, mealName, entry, index });
+          });
+        });
+      });
+    return entries;
+  }
+
+  metadataForIngredient(name) {
+    const file = this.resolveIngredientFile(name);
+    return file ? this.metaForFile(file) : {};
+  }
+
+  shoppingCategoryForIngredient(name, meta) {
+    const explicit = firstValue(meta.category, meta.grocery_category, meta.shopping_category);
+    if (explicit) return titleCaseWords(cleanWiki(explicit));
+
+    const normalized = normalizeIngredientName(name);
+    const rules = shoppingCategoryRules();
+    const match = rules.find((rule) => rule.pattern.test(normalized));
+    return match ? match.category : "Other";
+  }
+
+  isPantryIngredient(name, meta, category) {
+    const explicit = firstPresentValue(meta.pantry, meta.staple, meta.usually_stocked);
+    if (explicit.present) return truthyFrontmatter(explicit.value);
+    if (category === "Seasonings") return true;
+    return pantryIngredientPattern().test(normalizeIngredientName(name));
   }
 
   nutrientsForEntries(entries) {
@@ -768,6 +1026,17 @@ class MealPlannerView extends ItemView {
     this.render();
   }
 
+  moveShoppingRange(direction) {
+    if (!isDateKey(this.shoppingFromDate) || !isDateKey(this.shoppingToDate)) return;
+    const from = new Date(`${this.shoppingFromDate}T00:00:00`);
+    const to = new Date(`${this.shoppingToDate}T00:00:00`);
+    const span = Math.max(1, Math.round((to - from) / 86400000) + 1);
+    this.shoppingFromDate = formatDateKey(addDays(from, direction * span));
+    this.shoppingToDate = formatDateKey(addDays(to, direction * span));
+    this.cursorDate = startOfDay(new Date(`${this.shoppingFromDate}T00:00:00`));
+    this.render();
+  }
+
   daysForView() {
     if (this.viewMode === "day") return [this.cursorDate];
     if (this.viewMode === "week") {
@@ -780,6 +1049,7 @@ class MealPlannerView extends ItemView {
   }
 
   titleForCursor() {
+    if (this.primaryMode === "shopping") return "Shopping list";
     if (this.viewMode === "day") {
       return this.cursorDate.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric", year: "numeric" });
     }
@@ -799,6 +1069,17 @@ class MealPlannerView extends ItemView {
     return String(date.getDate());
   }
 
+  syncShoppingRangeToCalendar() {
+    if (this.viewMode === "day") {
+      this.shoppingFromDate = formatDateKey(this.cursorDate);
+      this.shoppingToDate = formatDateKey(this.cursorDate);
+      return;
+    }
+    const start = startOfWeek(this.cursorDate);
+    this.shoppingFromDate = formatDateKey(start);
+    this.shoppingToDate = formatDateKey(addDays(start, 6));
+  }
+
   segmented(parent, values, active, onChange) {
     const group = parent.createDiv({ cls: "mp-segmented" });
     values.forEach((value) => {
@@ -809,6 +1090,15 @@ class MealPlannerView extends ItemView {
         button.addEventListener("click", () => onChange(value));
       });
     });
+  }
+
+  dateInput(parent, labelText, value, onChange) {
+    const label = parent.createEl("label", { cls: "mp-date-control" });
+    label.createSpan({ text: labelText });
+    const input = label.createEl("input", { attr: { type: "date" } });
+    input.value = value;
+    input.addEventListener("change", () => onChange(input.value));
+    return input;
   }
 
   iconButton(parent, icon, ariaLabel, onClick) {
@@ -1363,10 +1653,17 @@ function recipeImageRef(text, meta) {
 
 function firstValue(...values) {
   for (const value of values) {
-    const normalized = normalizeArray(value).map(cleanImageRef).find(Boolean);
+    const normalized = normalizeArray(value).map(cleanImageRef).find((item) => item !== "");
     if (normalized) return normalized;
   }
   return "";
+}
+
+function firstPresentValue(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && value !== "") return { present: true, value };
+  }
+  return { present: false, value: "" };
 }
 
 function cleanImageRef(value) {
@@ -1543,6 +1840,62 @@ function displayUnit(unit) {
   return unit;
 }
 
+function shoppingItemKey(name, category, pantry, unit) {
+  return [name, category, pantry ? "pantry" : "buy", unit].map((part) => String(part || "").toLowerCase()).join("::");
+}
+
+function titleCaseWords(value) {
+  return String(value || "")
+    .replace(/[_-]+/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => titleCase(word.toLowerCase()))
+    .join(" ");
+}
+
+function normalizeIngredientName(value) {
+  return String(value || "").toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ");
+}
+
+function truthyFrontmatter(value) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  return /^(true|yes|y|1|on)$/i.test(String(value || "").trim());
+}
+
+function preferredShoppingCategories() {
+  return [
+    "Produce",
+    "Protein",
+    "Seafood",
+    "Dairy",
+    "Dry Goods",
+    "Canned & Jarred",
+    "Frozen",
+    "Bakery",
+    "Seasonings",
+    "Other",
+  ];
+}
+
+function shoppingCategoryRules() {
+  return [
+    { category: "Seasonings", pattern: pantryIngredientPattern() },
+    { category: "Produce", pattern: /vegetable|veggie|fruit|herb|mushroom|tomato|potato|onion|garlic|ginger|scallion|spring onion|cilantro|parsley|lettuce|cabbage|carrot|celery|pepper|chili|lemon|lime|banana|apple|菜|蔥|薑|蒜|菇|蘑菇|番茄|蕃茄|薯|蘿蔔|椰菜|芫茜|檸檬/ },
+    { category: "Seafood", pattern: /fish|salmon|tuna|shrimp|prawn|scallop|clam|mussel|seafood|魚|蝦|帶子|蜆|青口|海鮮/ },
+    { category: "Protein", pattern: /chicken|beef|pork|lamb|turkey|meat|egg|tofu|bean curd|豆腐|蛋|雞|牛|豬|羊|肉/ },
+    { category: "Dairy", pattern: /milk|cream|butter|cheese|yogurt|yoghurt|kefir|奶|忌廉|牛油|芝士|乳酪/ },
+    { category: "Dry Goods", pattern: /rice|noodle|pasta|flour|oat|grain|bean|lentil|麵|麵粉|飯|米|意粉|燕麥|豆/ },
+    { category: "Canned & Jarred", pattern: /canned|can|jar|paste|罐|樽|醬/ },
+    { category: "Frozen", pattern: /frozen|急凍|冰鮮/ },
+    { category: "Bakery", pattern: /bread|bun|toast|bagel|包|麵包|多士/ },
+  ];
+}
+
+function pantryIngredientPattern() {
+  return /salt|pepper|oil|olive oil|soy sauce|vinegar|sugar|spice|powder|sauce|sesame|cornstarch|starch|stock|bouillon|miso|gochujang|doenjang|mustard|ketchup|mayo|mayonnaise|鹽|胡椒|油|豉油|醬油|醋|糖|香料|粉|醬|麻油|生粉|粟粉|味噌/;
+}
+
 async function fetchLatestRelease() {
   const response = await requestUrl({
     url: `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`,
@@ -1636,6 +1989,12 @@ function startOfWeek(date) {
   const start = startOfDay(date);
   start.setDate(start.getDate() - start.getDay());
   return start;
+}
+
+function addDays(date, count) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + count);
+  return next;
 }
 
 function rangeDays(start, count) {

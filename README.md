@@ -1,6 +1,19 @@
 # Meal Planner
 Organize your recipe in an actionable way
 
+## Shopping list
+
+Open the Meal Planner view and switch from Calendar to Shopping. Choose a from date and to date to aggregate planned recipe ingredients into a supermarket-style list.
+
+Ingredient notes can control shopping categories and pantry staples:
+
+```yaml
+category: Seasonings
+pantry: true
+```
+
+Supported category aliases are `category`, `grocery_category`, and `shopping_category`. Supported pantry aliases are `pantry`, `staple`, and `usually_stocked`. Pantry items stay visible in a separate section so common seasonings are easy to ignore without losing them from the plan.
+
 ## Update from inside Obsidian
 
 The plugin can check GitHub for the latest stable release from inside Obsidian:
