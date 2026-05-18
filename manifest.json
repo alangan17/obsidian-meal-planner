@@ -1,7 +1,7 @@
 {
   "id": "faanday",
   "name": "FaanDay",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "minAppVersion": "1.5.0",
   "description": "Plan daily cooking in Obsidian with recipe links, shopping lists, and nutrition views.",
   "author": "Alan Ngan",
