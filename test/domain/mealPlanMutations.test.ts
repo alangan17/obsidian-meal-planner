@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { transferEntryInPlans } from "../../src/domain/mealPlanMutations";
+import { addSampleEntryToPlans, sampleIngredientMarkdown, sampleRecipeMarkdown, transferEntryInPlans } from "../../src/domain/mealPlanMutations";
 import type { MealPlans } from "../../src/domain/types";
 
 describe("meal plan mutations", () => {
@@ -52,5 +52,67 @@ describe("meal plan mutations", () => {
 
     expect(result).toEqual({ changed: false, reason: "missing-source" });
     expect(plans).toEqual({});
+  });
+
+  it("adds the sample recipe to dinner for empty plans", () => {
+    const plans: MealPlans = {};
+
+    const result = addSampleEntryToPlans(plans, "2026-05-18", "recipe/Tomato Egg Rice.md");
+
+    expect(result.added).toBe(true);
+    expect(plans).toEqual({
+      "2026-05-18": {
+        Dinner: [{ path: "recipe/Tomato Egg Rice.md", name: "Tomato Egg Rice" }],
+      },
+    });
+  });
+
+  it("does not duplicate an existing sample dinner entry", () => {
+    const plans: MealPlans = {
+      "2026-05-18": {
+        Dinner: [{ path: "recipe/Tomato Egg Rice.md", name: "Tomato Egg Rice" }],
+      },
+    };
+
+    const result = addSampleEntryToPlans(plans, "2026-05-18", "recipe/Tomato Egg Rice.md");
+
+    expect(result.added).toBe(false);
+    expect(plans["2026-05-18"].Dinner).toHaveLength(1);
+  });
+
+  it("preserves unrelated meals when adding the sample entry", () => {
+    const plans: MealPlans = {
+      "2026-05-18": {
+        Breakfast: [{ path: "recipe/Oatmeal.md", name: "Oatmeal" }],
+      },
+    };
+
+    addSampleEntryToPlans(plans, "2026-05-18", "recipe/Tomato Egg Rice.md");
+
+    expect(plans["2026-05-18"].Breakfast).toEqual([{ path: "recipe/Oatmeal.md", name: "Oatmeal" }]);
+    expect(plans["2026-05-18"].Dinner).toEqual([{ path: "recipe/Tomato Egg Rice.md", name: "Tomato Egg Rice" }]);
+  });
+
+  it("generates sample recipe markdown with parseable ingredient quantities", () => {
+    const text = sampleRecipeMarkdown();
+
+    expect(text).toContain("name: Tomato Egg Rice");
+    expect(text).toContain("servings: 2");
+    expect(text).toContain("- [[Egg]] 4 units");
+    expect(text).toContain("- [[Tomato]] 300g");
+    expect(text).toContain("- [[Rice]] 300g");
+    expect(text).toContain("- [[Soy Sauce]] 1 tbsp");
+    expect(text).toContain("- [[Oil]] 1 tbsp");
+  });
+
+  it("generates sample ingredient metadata with pantry flags", () => {
+    expect(sampleIngredientMarkdown({ category: "Seasonings", pantry: true })).toBe([
+      "---",
+      "category: Seasonings",
+      "pantry: true",
+      "---",
+      "",
+    ].join("\n"));
+    expect(sampleIngredientMarkdown({ category: "Produce", pantry: false })).toContain("pantry: false");
   });
 });

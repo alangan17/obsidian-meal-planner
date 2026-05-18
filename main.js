@@ -313,6 +313,16 @@ function mealPlanEntriesMatch(a, b) {
 }
 
 // src/domain/mealPlanMutations.ts
+var SAMPLE_RECIPE_NAME = "Tomato Egg Rice";
+var SAMPLE_RECIPE_FILENAME = `${SAMPLE_RECIPE_NAME}.md`;
+var SAMPLE_RECIPE_INGREDIENTS = ["Egg", "Tomato", "Rice", "Soy Sauce", "Oil"];
+var SAMPLE_INGREDIENT_METADATA = [
+  { name: "Egg", category: "Protein", pantry: false },
+  { name: "Tomato", category: "Produce", pantry: false },
+  { name: "Rice", category: "Dry Goods", pantry: false },
+  { name: "Soy Sauce", category: "Seasonings", pantry: true },
+  { name: "Oil", category: "Seasonings", pantry: true }
+];
 function cloneEntry(entry) {
   return JSON.parse(JSON.stringify(entry));
 }
@@ -331,6 +341,54 @@ function addEntryToPlans(plans, dayKey, mealName, recipe, targetServings) {
   }
   plans[dayKey][mealName].push(entry);
   return entry;
+}
+function addSampleEntryToPlans(plans, dayKey, recipePath) {
+  const entry = { path: recipePath, name: SAMPLE_RECIPE_NAME };
+  if (!plans[dayKey]) plans[dayKey] = {};
+  if (!plans[dayKey].Dinner) plans[dayKey].Dinner = [];
+  const existing = plans[dayKey].Dinner.find((item) => mealPlanEntriesMatch(item, entry));
+  if (existing) return { entry: existing, added: false };
+  plans[dayKey].Dinner.push(cloneEntry(entry));
+  return { entry, added: true };
+}
+function sampleRecipeMarkdown() {
+  return [
+    "---",
+    "type: recipe",
+    `name: ${SAMPLE_RECIPE_NAME}`,
+    "servings: 2",
+    "tags:",
+    "  - dinner",
+    "  - sample",
+    "ingredients:",
+    ...SAMPLE_RECIPE_INGREDIENTS.map((name) => `  - ${name}`),
+    "---",
+    "",
+    "## Ingredients / \u6750\u6599",
+    "",
+    "- [[Egg]] 4 units",
+    "- [[Tomato]] 300g",
+    "- [[Rice]] 300g",
+    "- [[Soy Sauce]] 1 tbsp",
+    "- [[Oil]] 1 tbsp",
+    "",
+    "## Method / \u505A\u6CD5",
+    "",
+    "1. Cook the rice.",
+    "2. Scramble the eggs, then set them aside.",
+    "3. Cook the tomato until softened, then add the eggs back.",
+    "4. Season with soy sauce and serve over rice.",
+    ""
+  ].join("\n");
+}
+function sampleIngredientMarkdown(item) {
+  return [
+    "---",
+    `category: ${item.category}`,
+    `pantry: ${item.pantry ? "true" : "false"}`,
+    "---",
+    ""
+  ].join("\n");
 }
 function importEntriesIntoPlans(plans, parsed, mode, rangeDateKeys2) {
   if (mode === "replace") {
@@ -655,6 +713,17 @@ function parseVersion(version) {
 
 // src/main.ts
 var VIEW_TYPE = "meal-planner-view";
+var MEAL_PLANNER_ICON = "meal-planner";
+var MEAL_PLANNER_ICON_SVG = `
+<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="7">
+  <path d="M30 10v18" />
+  <path d="M70 10v18" />
+  <path d="M17 38h66" />
+  <rect x="14" y="20" width="72" height="68" rx="9" />
+  <circle cx="50" cy="63" r="16" />
+  <circle cx="50" cy="63" r="5" />
+</g>
+`;
 var DEFAULT_SETTINGS = {
   recipeFolder: "recipe",
   ingredientsFolder: "ingredients",
@@ -665,8 +734,9 @@ var DEFAULT_SETTINGS = {
 var MealPlannerCalendarPlugin = class extends import_obsidian2.Plugin {
   async onload() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    (0, import_obsidian2.addIcon)(MEAL_PLANNER_ICON, MEAL_PLANNER_ICON_SVG);
     this.registerView(VIEW_TYPE, (leaf) => new MealPlannerView(leaf, this));
-    this.addRibbonIcon("calendar-days", "Meal planner", () => {
+    this.addRibbonIcon(MEAL_PLANNER_ICON, "Meal planner", () => {
       this.activateView();
     });
     this.addCommand({
@@ -679,6 +749,14 @@ var MealPlannerCalendarPlugin = class extends import_obsidian2.Plugin {
       name: "Check for stable release update",
       callback: () => this.checkForStableReleaseUpdate({ install: true })
     });
+    this.addCommand({
+      id: "create-sample-meal-plan",
+      name: "Create sample meal plan",
+      callback: async () => {
+        const view = await this.activateView();
+        if (view instanceof MealPlannerView) await view.createSampleMealPlan();
+      }
+    });
     this.addSettingTab(new MealPlannerSettingTab(this.app, this));
   }
   async onunload() {
@@ -689,6 +767,7 @@ var MealPlannerCalendarPlugin = class extends import_obsidian2.Plugin {
     const leaf = leaves[0] || this.app.workspace.getLeaf(true);
     await leaf.setViewState({ type: VIEW_TYPE, active: true });
     this.app.workspace.revealLeaf(leaf);
+    return leaf.view;
   }
   async saveSettings() {
     await this.saveData(this.settings);
@@ -799,6 +878,8 @@ var MealPlannerView = class extends import_obsidian2.ItemView {
     this.shoppingToDate = formatDateKey(addDays(startOfWeek(this.cursorDate), 6));
     this.showPantryItems = true;
     this.shoppingCheckedItems = /* @__PURE__ */ new Set();
+    this.mobileControlsOpen = false;
+    this.pendingFocusDayKey = null;
     this.recipeCache = [];
     this.fileMetaCache = /* @__PURE__ */ new Map();
     this.dragPayload = null;
@@ -810,7 +891,7 @@ var MealPlannerView = class extends import_obsidian2.ItemView {
     return "Meal planner";
   }
   getIcon() {
-    return "calendar-days";
+    return MEAL_PLANNER_ICON;
   }
   async onOpen() {
     this.containerEl.addClass("meal-planner-view");
@@ -822,99 +903,162 @@ var MealPlannerView = class extends import_obsidian2.ItemView {
   async render() {
     this.fileMetaCache.clear();
     this.recipeCache = await this.loadRecipes();
+    this.containerEl.querySelectorAll(".mp-mobile-toolbar").forEach((toolbar) => toolbar.remove());
+    const viewHeader = this.containerEl.children[0];
+    if (viewHeader) this.renderToolbar(viewHeader);
     const container = this.containerEl.children[1];
     container.empty();
     container.addClass("meal-planner-root");
-    const stickyHeader = container.createDiv({ cls: "mp-sticky-header" });
-    this.renderToolbar(stickyHeader);
     if (this.primaryMode === "calendar" && this.viewMode !== "day") {
+      const stickyHeader = container.createDiv({ cls: "mp-sticky-header" });
       this.renderWeekHeader(stickyHeader);
     }
     if (this.primaryMode === "shopping") {
       this.renderShoppingList(container);
     } else {
+      if (this.recipeCache.length === 0) this.renderSampleOnboarding(container);
       this.renderCalendar(container);
+      this.focusPendingDay();
     }
   }
+  renderSampleOnboarding(container) {
+    const empty = container.createDiv({ cls: "mp-onboarding-empty" });
+    const content = empty.createDiv({ cls: "mp-onboarding-content" });
+    content.createDiv({
+      cls: "mp-onboarding-title",
+      text: "Create a sample recipe and shopping list to see how Meal Planner works."
+    });
+    content.createDiv({
+      cls: "mp-onboarding-copy",
+      text: "Meal Planner will add one recipe, ingredient notes, and today's dinner plan."
+    });
+    empty.createEl("button", { cls: "mp-button", text: "Create sample plan" }, (button) => {
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+          await this.createSampleMealPlan();
+        } finally {
+          button.disabled = false;
+        }
+      });
+    });
+  }
   renderToolbar(container) {
-    const toolbar = container.createDiv({ cls: "mp-toolbar" });
-    const left = toolbar.createDiv({ cls: "mp-toolbar-group" });
-    this.iconButton(left, "chevron-left", "Previous", () => {
+    const toolbar = container.createDiv({ cls: "mp-mobile-toolbar" });
+    const nav = toolbar.createDiv({ cls: "mp-mobile-nav" });
+    const actions = nav.createDiv({ cls: "mp-mobile-actions" });
+    actions.createDiv({ cls: "mp-mobile-title", text: this.titleForCursor() });
+    this.iconButton(actions, "chevron-left", "Previous", () => {
+      this.mobileControlsOpen = false;
       if (this.primaryMode === "shopping") this.moveShoppingRange(-1);
       else this.moveCursor(-1);
     });
-    left.createEl("button", { cls: "mp-button", text: "Today" }, (button) => {
+    actions.createEl("button", { cls: "mp-button", text: "Today" }, (button) => {
       button.addEventListener("click", () => {
-        this.cursorDate = startOfDay(/* @__PURE__ */ new Date());
+        this.mobileControlsOpen = false;
+        const today = startOfDay(/* @__PURE__ */ new Date());
+        this.cursorDate = today;
+        this.pendingFocusDayKey = this.primaryMode === "calendar" ? formatDateKey(today) : null;
         if (this.primaryMode === "shopping") this.syncShoppingRangeToCalendar();
         this.render();
       });
     });
-    this.iconButton(left, "chevron-right", "Next", () => {
+    this.iconButton(actions, "chevron-right", "Next", () => {
+      this.mobileControlsOpen = false;
       if (this.primaryMode === "shopping") this.moveShoppingRange(1);
       else this.moveCursor(1);
     });
-    toolbar.createDiv({ cls: "mp-title", text: this.titleForCursor() });
-    const right = toolbar.createDiv({ cls: "mp-toolbar-group mp-toolbar-wrap" });
-    const primaryControls = this.toolbarControlGroup(right);
-    this.segmented(primaryControls, ["calendar", "shopping"], this.primaryMode, (value) => {
-      this.primaryMode = value;
-      if (value === "shopping") this.syncShoppingRangeToCalendar();
+    const menuButton = this.iconButton(actions, "more-horizontal", "Planner controls", () => {
+      this.mobileControlsOpen = !this.mobileControlsOpen;
       this.render();
     });
-    this.renderPlanTransferButtons(this.toolbarControlGroup(right));
+    if (this.mobileControlsOpen) menuButton.addClass("is-active");
+    if (this.mobileControlsOpen) this.renderMobileControls(toolbar);
+  }
+  renderMobileControls(parent) {
+    const panel = parent.createDiv({ cls: "mp-mobile-menu" });
+    const closeAndRender = () => {
+      this.mobileControlsOpen = false;
+      this.render();
+    };
+    this.renderMobileControlSection(panel, "View", (section) => {
+      this.segmented(this.toolbarControlGroup(section), ["calendar", "shopping"], this.primaryMode, (value) => {
+        this.primaryMode = value;
+        if (value === "shopping") this.syncShoppingRangeToCalendar();
+        closeAndRender();
+      });
+    });
     if (this.primaryMode === "shopping") {
-      this.renderShoppingControls(this.toolbarControlGroup(right, "mp-toolbar-control-wide"));
-      return;
+      this.renderMobileControlSection(panel, "Range", (section) => {
+        this.renderShoppingControls(this.toolbarControlGroup(section, "mp-toolbar-control-wide"), closeAndRender);
+      });
+    } else {
+      this.renderMobileControlSection(panel, "Range", (section) => {
+        this.segmented(this.toolbarControlGroup(section), ["month", "week", "day"], this.viewMode, (value) => {
+          this.viewMode = value;
+          closeAndRender();
+        });
+      });
+      this.renderMobileControlSection(panel, "Detail", (section) => {
+        this.segmented(this.toolbarControlGroup(section), ["recipe", "ingredients", "nutrition"], this.detailMode, (value) => {
+          this.detailMode = value;
+          closeAndRender();
+        });
+      });
+      this.renderMobileControlSection(panel, "Grouping", (section) => {
+        this.segmented(this.toolbarControlGroup(section), ["meals", "all day"], this.groupMode, (value) => {
+          this.groupMode = value;
+          closeAndRender();
+        });
+      });
     }
-    const viewControls = this.toolbarControlGroup(right);
-    this.segmented(viewControls, ["month", "week", "day"], this.viewMode, (value) => {
-      this.viewMode = value;
-      this.render();
+    this.renderMobileControlSection(panel, "Transfer", (section) => {
+      this.renderPlanTransferButtons(this.toolbarControlGroup(section), closeAndRender);
     });
-    const detailControls = this.toolbarControlGroup(right);
-    this.segmented(detailControls, ["recipe", "ingredients", "nutrition"], this.detailMode, (value) => {
-      this.detailMode = value;
-      this.render();
-    });
-    const groupControls = this.toolbarControlGroup(right);
-    this.segmented(groupControls, ["meals", "all day"], this.groupMode, (value) => {
-      this.groupMode = value;
-      this.render();
-    });
+  }
+  renderMobileControlSection(parent, label, renderContent) {
+    const section = parent.createDiv({ cls: "mp-mobile-menu-section" });
+    section.createDiv({ cls: "mp-mobile-menu-label", text: label });
+    const content = section.createDiv({ cls: "mp-mobile-menu-content" });
+    renderContent(content);
   }
   toolbarControlGroup(parent, cls = "") {
     return parent.createDiv({ cls: `mp-toolbar-control ${cls}`.trim() });
   }
-  renderPlanTransferButtons(parent) {
+  renderPlanTransferButtons(parent, onAction = null) {
     const actions = parent.createDiv({ cls: "mp-plan-transfer" });
     actions.createEl("button", { cls: "mp-button", text: "Import" }, (button) => {
       button.addEventListener("click", () => {
+        if (onAction) onAction();
         new MealPlanImportModal(this.app, this).open();
       });
     });
     actions.createEl("button", { cls: "mp-button", text: "Export" }, (button) => {
       button.addEventListener("click", () => {
+        if (onAction) onAction();
         new MealPlanExportModal(this.app, this).open();
       });
     });
   }
-  renderShoppingControls(parent) {
+  renderShoppingControls(parent, onChangeEnd = null) {
     const dates = parent.createDiv({ cls: "mp-shopping-controls" });
     this.dateInput(dates, "From", this.shoppingFromDate, (value) => {
       this.shoppingFromDate = value;
-      this.render();
+      if (onChangeEnd) onChangeEnd();
+      else this.render();
     });
     this.dateInput(dates, "To", this.shoppingToDate, (value) => {
       this.shoppingToDate = value;
-      this.render();
+      if (onChangeEnd) onChangeEnd();
+      else this.render();
     });
     const label = dates.createEl("label", { cls: "mp-toggle" });
     const input = label.createEl("input", { attr: { type: "checkbox" } });
     input.checked = this.showPantryItems;
     input.addEventListener("change", () => {
       this.showPantryItems = input.checked;
-      this.render();
+      if (onChangeEnd) onChangeEnd();
+      else this.render();
     });
     label.createSpan({ text: "Pantry" });
   }
@@ -925,6 +1069,17 @@ var MealPlannerView = class extends import_obsidian2.ItemView {
     });
     const grid = calendar.createDiv({ cls: "mp-grid" });
     days.forEach((date) => this.renderDay(grid, date));
+  }
+  focusPendingDay() {
+    if (!this.pendingFocusDayKey) return;
+    const dayKey = this.pendingFocusDayKey;
+    this.pendingFocusDayKey = null;
+    window.requestAnimationFrame(() => {
+      const day = this.containerEl.querySelector(`.mp-day[data-day-key="${dayKey}"]`);
+      if (!(day instanceof HTMLElement)) return;
+      day.focus({ preventScroll: true });
+      day.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+    });
   }
   renderWeekHeader(parent) {
     const header = parent.createDiv({ cls: "mp-week-header" });
@@ -942,7 +1097,8 @@ var MealPlannerView = class extends import_obsidian2.ItemView {
         "mp-day",
         isOtherMonth && this.viewMode === "month" ? "mp-muted-day" : "",
         isToday ? "mp-today" : ""
-      ].filter(Boolean).join(" ")
+      ].filter(Boolean).join(" "),
+      attr: { "data-day-key": key, tabindex: "-1" }
     });
     this.entryDropTarget(day, key, null);
     const head = day.createDiv({ cls: "mp-day-head" });
@@ -1351,6 +1507,38 @@ var MealPlannerView = class extends import_obsidian2.ItemView {
     }
     await this.plugin.saveSettings();
     await this.render();
+  }
+  async createSampleMealPlan() {
+    try {
+      const recipeFolder = cleanFolderPath(this.plugin.settings.recipeFolder) || DEFAULT_SETTINGS.recipeFolder;
+      const ingredientsFolder = cleanFolderPath(this.plugin.settings.ingredientsFolder) || DEFAULT_SETTINGS.ingredientsFolder;
+      await ensureFolder(this.app, recipeFolder);
+      await ensureFolder(this.app, ingredientsFolder);
+      const recipePath = `${recipeFolder}/${SAMPLE_RECIPE_FILENAME}`;
+      if (!this.app.vault.getAbstractFileByPath(recipePath)) {
+        await this.app.vault.create(recipePath, sampleRecipeMarkdown());
+      }
+      for (const item of SAMPLE_INGREDIENT_METADATA) {
+        const ingredientPath = `${ingredientsFolder}/${safeFileName(item.name)}.md`;
+        if (!this.app.vault.getAbstractFileByPath(ingredientPath)) {
+          await this.app.vault.create(ingredientPath, sampleIngredientMarkdown(item));
+        }
+      }
+      const todayKey = formatDateKey(/* @__PURE__ */ new Date());
+      addSampleEntryToPlans(this.plugin.settings.plans, todayKey, recipePath);
+      await this.plugin.saveSettings();
+      this.cursorDate = startOfDay(/* @__PURE__ */ new Date());
+      this.primaryMode = "shopping";
+      this.viewMode = "week";
+      this.syncShoppingRangeToCalendar();
+      this.recipeCache = await this.loadRecipes();
+      await this.render();
+      new import_obsidian2.Notice(`Created sample meal plan with ${SAMPLE_RECIPE_NAME}.`);
+      return true;
+    } catch (error) {
+      new import_obsidian2.Notice(`Could not create sample meal plan: ${error?.message || String(error)}`);
+      return false;
+    }
   }
   mealNamesFor(dayPlans) {
     const names = Object.keys(dayPlans);
